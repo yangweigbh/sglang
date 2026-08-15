@@ -4,9 +4,10 @@ should use that classmethod API; do not import from this module directly.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import warnings
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Type
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type
 
 import torch
 
@@ -39,6 +40,26 @@ class CustomSpecAlgo:
     disabled (synchronous). Migrate plugin workers to the V2 schema and
     overlap scheduling.
     """
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        override = cls.__dict__.get("build_disagg_draft_input")
+        if not inspect.isfunction(override) or not _is_legacy_disagg_override(
+            inspect.signature(override)
+        ):
+            return
+        warnings.warn(
+            f"{cls.__module__}.{cls.__qualname__}.build_disagg_draft_input() "
+            "takes the deprecated server_args argument; it is called without "
+            "one and the argument will be removed in a future release. Define "
+            "it as build_disagg_draft_input(self, batch, last_tokens_tensor, "
+            "future_map) and read the speculative config from "
+            "sglang.srt.runtime_context.get_spec().",
+            DeprecationWarning,
+            # This method, then the class statement that triggered it.
+            stacklevel=2,
+        )
+        cls.build_disagg_draft_input = _adapt_legacy_disagg_override(override)
 
     def __init__(
         self,
@@ -153,14 +174,154 @@ class CustomSpecAlgo:
             num_draft_tokens, is_draft_worker
         )
 
+    # TODO(ch-wan, 2026-09-17): remove the deprecated ``server_args`` parameter
+    # below, together with the ``*args`` shim and the legacy-override adapter;
+    # the hook is then ``(self, batch, last_tokens_tensor, future_map)``.
     def build_disagg_draft_input(
         self,
         batch: ScheduleBatch,
-        server_args: ServerArgs,
-        last_tokens_tensor: torch.Tensor,
-        future_map: FutureMap,
+        *args,
+        server_args: Optional[ServerArgs] = None,
+        last_tokens_tensor: Optional[torch.Tensor] = None,
+        future_map: Optional[FutureMap] = None,
     ) -> Optional[SpecInput]:
+        """Build the disaggregation draft input for ``batch``, or ``None``.
+
+        The call is ``(batch, last_tokens_tensor, future_map)``. ``server_args``
+        is bound only by the pre-bag call shape and is not read here: the
+        speculative config comes from ``runtime_context.get_spec()``, which
+        follows a runtime override where the startup record does not. An
+        override still written against the pre-bag shape keeps working and is
+        handed ``server_args=None`` under the current call -- read the bag for
+        any value it used to take from that object.
+        """
+        _resolve_disagg_draft_input_args(
+            args, server_args, last_tokens_tensor, future_map
+        )
         return None
+
+
+# The pre-bag call passed ``server_args`` in the position the current call uses
+# for ``last_tokens_tensor``, so the two shapes are separated by how many
+# positional arguments follow ``batch`` -- never by looking at the values.
+_LEGACY_DISAGG_POSITIONAL = ("server_args", "last_tokens_tensor", "future_map")
+_DISAGG_POSITIONAL = ("last_tokens_tensor", "future_map")
+
+
+def _resolve_disagg_draft_input_args(
+    args: tuple,
+    server_args: Optional[ServerArgs],
+    last_tokens_tensor: Optional[torch.Tensor],
+    future_map: Optional[FutureMap],
+) -> Tuple[Optional[ServerArgs], Optional[torch.Tensor], Optional[FutureMap]]:
+    """Bind ``build_disagg_draft_input`` arguments from either call shape.
+
+    ``args`` are the positional arguments after ``batch``: three is the pre-bag
+    shape, two the current one. A call that carries ``server_args`` gets the
+    deprecation warning; the argument itself is passed through for the adapter
+    below and read nowhere else.
+    """
+    bound = {
+        "server_args": server_args,
+        "last_tokens_tensor": last_tokens_tensor,
+        "future_map": future_map,
+    }
+    if len(args) == len(_LEGACY_DISAGG_POSITIONAL):
+        names = _LEGACY_DISAGG_POSITIONAL
+    elif len(args) == len(_DISAGG_POSITIONAL):
+        names = _DISAGG_POSITIONAL
+    elif len(args) == 1:
+        # One positional plus keywords: the lone positional fills the first slot
+        # the keywords left open, which is ``server_args`` exactly when the
+        # caller named ``last_tokens_tensor`` itself.
+        names = (
+            ("server_args",) if last_tokens_tensor is not None else _DISAGG_POSITIONAL
+        )
+    elif not args:
+        names = ()
+    else:
+        raise TypeError(
+            "build_disagg_draft_input() takes (batch, last_tokens_tensor, "
+            f"future_map); got {1 + len(args)} positional arguments"
+        )
+    for name, value in zip(names, args):
+        if bound[name] is not None:
+            raise TypeError(
+                f"build_disagg_draft_input() got multiple values for argument "
+                f"'{name}'"
+            )
+        bound[name] = value
+    if bound["server_args"] is not None:
+        warnings.warn(
+            "Passing server_args to CustomSpecAlgo.build_disagg_draft_input() "
+            "is deprecated and will be removed in a future release. Call it as "
+            "build_disagg_draft_input(batch, last_tokens_tensor, future_map) "
+            "and read the speculative config from "
+            "sglang.srt.runtime_context.get_spec().",
+            DeprecationWarning,
+            # This helper, the hook that calls it, then the hook's caller.
+            stacklevel=3,
+        )
+    return bound["server_args"], bound["last_tokens_tensor"], bound["future_map"]
+
+
+def _binds_positionally(signature: inspect.Signature, count: int) -> bool:
+    """Whether ``signature`` accepts ``count`` positional arguments."""
+    try:
+        signature.bind(*([None] * count))
+    except TypeError:
+        return False
+    return True
+
+
+def _is_legacy_disagg_override(signature: inspect.Signature) -> bool:
+    """Whether an override is written against the pre-bag argument list.
+
+    Pre-bag means it takes ``self`` plus four positional arguments. An override
+    that also binds the current three-argument call is pre-bag only when the
+    slot the current call fills with ``last_tokens_tensor`` is named
+    ``server_args``, which is how a trailing default (``future_map=None``)
+    would otherwise mis-bind in silence.
+    """
+    if not _binds_positionally(signature, 5):
+        return False
+    if not _binds_positionally(signature, 4):
+        return True
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) > 2 and positional[2].name == "server_args"
+
+
+def _adapt_legacy_disagg_override(override: Callable) -> Callable:
+    """Wrap a pre-bag override so the dispatch's call reaches it."""
+
+    def build_disagg_draft_input(
+        self,
+        batch,
+        *args,
+        server_args=None,
+        last_tokens_tensor=None,
+        future_map=None,
+    ):
+        server_args, last_tokens_tensor, future_map = _resolve_disagg_draft_input_args(
+            args, server_args, last_tokens_tensor, future_map
+        )
+        # ``server_args`` stays whatever the caller bound: the current call
+        # shape binds nothing, so a pre-bag override is handed ``None``. The
+        # shim does not reach for the process-wide record -- an override that
+        # needs a resolved value reads the bag for it, which is the value a
+        # runtime override moves and the record does not.
+        return override(self, batch, server_args, last_tokens_tensor, future_map)
+
+    build_disagg_draft_input.__doc__ = override.__doc__
+    build_disagg_draft_input.__qualname__ = override.__qualname__
+    build_disagg_draft_input.__module__ = override.__module__
+    build_disagg_draft_input._legacy_disagg_override = override
+    return build_disagg_draft_input
 
 
 _REGISTRY: Dict[str, CustomSpecAlgo] = {}
