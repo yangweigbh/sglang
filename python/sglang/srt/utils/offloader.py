@@ -77,7 +77,7 @@ def create_offloader_from_server_args(server_args: ServerArgs, dp_rank: int):
             prefetch_step=server_args.offload_prefetch_step,
             mode=server_args.offload_mode,
             dp_rank=dp_rank,
-            dp_size=server_args.dp_size,
+            dp_size=get_parallel().dp_size,
         )
     return NoopOffloader()
 

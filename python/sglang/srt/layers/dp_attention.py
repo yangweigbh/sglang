@@ -32,6 +32,7 @@ from sglang.srt.runtime_context import (
     configured_attn_cp_size,
     configured_moe_dp_size,
     get_flags,
+    get_parallel,
 )
 from sglang.srt.utils import get_bool_env_var, is_hip
 
@@ -345,8 +346,8 @@ def initialize_dp_attention(
     dp.max_len_with_idle = (
         getattr(model_config.hf_config, "hybrid_override_pattern", None) is not None
     )
-    enable_dp_attention = server_args.enable_dp_attention
-    dp_size = server_args.dp_size
+    enable_dp_attention = get_parallel().enable_dp_attention
+    dp_size = get_parallel().dp_size
     attn_cp_size = server_args.attn_cp_size
 
     dp.enabled = enable_dp_attention
