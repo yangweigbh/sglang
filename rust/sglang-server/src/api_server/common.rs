@@ -70,6 +70,14 @@ async fn await_control_result(
 
 /// `GET /get_model_info` (+ `/model_info` alias) — static model metadata from
 /// `server_args` (no scheduler round-trip); `is_generation` always true.
+///
+/// Under `SGLANG_RUST_SERVER=1` this is the only `/model_info` a client can
+/// reach — `launch_server` never mounts the Python app — so it answers the same
+/// keys. It answers them from the launch blob, which is the whole of this
+/// server's config knowledge: `server_args` is parsed once at boot and held
+/// behind an `Arc`, and no route mounted here changes weights or parsers.
+/// Python's tokenizer process keeps a control-plane log on top of the record
+/// and reports that; this server has none, so these are the record.
 async fn model_info(State(state): State<AppState>) -> Response {
     let sa = &state.server_args;
     let body = serde_json::json!({
@@ -81,7 +89,15 @@ async fn model_info(State(state): State<AppState>) -> Response {
         // `RustServer.launch` REFUSES to start when it is set. It can therefore
         // only be null here — echoing it keeps the field's shape.
         "preferred_sampling_params": sa.preferred_sampling_params,
+        // Not a field of this server's `ServerArgs`: Python answers the record
+        // value, which is `default` unless `--weight-version` or a weight
+        // update set one, so a launch that set it reads back null here.
         "weight_version": serde_json::Value::Null,
+        "load_format": sa.load_format,
+        // `auto` never reaches the blob: `resolve_auto_parsers` writes the
+        // selected parser into `server_args` before the scheduler forks.
+        "reasoning_parser": sa.reasoning_parser,
+        "tool_call_parser": sa.tool_call_parser,
     });
     (
         StatusCode::OK,

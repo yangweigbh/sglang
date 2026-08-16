@@ -3578,10 +3578,12 @@ def bind_or_assign(target, source):
 
 # TODO(hebiao064): Accelerate FA3 Spec Decode with topk > 1.
 # TODO(hebiao064): Improve the acc rate for FA3 Spec Decode with topk == 1 and page_size > 1.
-def is_no_spec_infer_or_topk_one(server_args):
-    return server_args.speculative_eagle_topk is None or (
-        server_args.speculative_eagle_topk == 1
-        and (server_args.page_size == 1 or server_args.page_size is None)
+def is_no_spec_infer_or_topk_one(cfg):
+    """``cfg`` is a resolving config view, not the published record: the
+    resolution pipeline is the only caller, and it asks mid-resolution."""
+    return cfg.speculative_eagle_topk is None or (
+        cfg.speculative_eagle_topk == 1
+        and (cfg.page_size == 1 or cfg.page_size is None)
     )
 
 
