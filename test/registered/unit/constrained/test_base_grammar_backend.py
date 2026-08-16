@@ -28,6 +28,7 @@ from sglang.srt.constrained.base_grammar_backend import (
     create_grammar_backend,
     register_grammar_backend,
 )
+from sglang.srt.runtime_context import get_context  # noqa: E402
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(2.0, "base-a-test-cpu")
@@ -234,6 +235,10 @@ class TestCreateGrammarBackend(unittest.TestCase):
     def _make_server_args(
         self, backend="none", reasoning_parser=None, enable_strict_thinking=False
     ):
+        # The factory picks the backend name off the published config.
+        override = get_context().override_server_args(grammar_backend=backend)
+        override.install()
+        self.addCleanup(override.restore)
         args = MagicMock()
         args.override = lambda source, **updates: [
             setattr(args, key, value) for key, value in updates.items()

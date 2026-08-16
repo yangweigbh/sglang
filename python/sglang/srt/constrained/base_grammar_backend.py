@@ -22,7 +22,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 import torch
 
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.runtime_context import get_context, get_resources
+from sglang.srt.runtime_context import get_context, get_exec, get_resources
 from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
@@ -315,7 +315,7 @@ def create_grammar_backend(
     eos_token_ids: Optional[set] = None,
     think_end_ids: Optional[List[int]] = None,
 ) -> Optional[BaseGrammarBackend]:
-    name = server_args.grammar_backend
+    name = get_exec().kernel.grammar_backend
 
     # Custom grammar backend has the highest priority
     if name in GRAMMAR_BACKEND_REGISTRY:

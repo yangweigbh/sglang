@@ -381,9 +381,15 @@ def build_processor_fingerprint(
     hf_config: Any,
     server_args: ServerArgs,
     *,
+    mm_process_config: Optional[Mapping[str, Any]] = None,
     extra: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """Fingerprint preprocessing choices that can change processor output."""
+    """Fingerprint preprocessing choices that can change processor output.
+
+    ``mm_process_config`` is passed in rather than read off ``server_args``:
+    the fingerprint has to reflect the *effective* preprocessing config, and
+    the caller is the one holding it.
+    """
     processor_payload = (
         processor.preprocess_fingerprint_payload()
         if isinstance(processor, PreprocessFingerprintProvider)
@@ -398,7 +404,7 @@ def build_processor_fingerprint(
         "model_revision": server_args.revision,
         "processor_revision": server_args.revision,
         "disable_fast_image_processor": server_args.disable_fast_image_processor,
-        "mm_process_config": server_args.mm_process_config or {},
+        "mm_process_config": mm_process_config or {},
         "processor": processor_payload,
         "extra": extra or {},
     }

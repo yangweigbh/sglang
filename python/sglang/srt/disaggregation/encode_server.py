@@ -57,7 +57,7 @@ from sglang.srt.mem_cache.multimodal_cache import EmbeddingResult, MultiModalSta
 from sglang.srt.model_executor.model_runner_components.load_model_utils import (
     maybe_precompile_model_kernels_after_loading,
 )
-from sglang.srt.model_loader import get_model
+from sglang.srt.model_loader import get_model as load_model
 from sglang.srt.multimodal.cache import parse_content_hash, snapshot_media
 from sglang.srt.multimodal.encoder_preprocessing import (
     EncoderPreprocessOutput,
@@ -73,10 +73,13 @@ from sglang.srt.observability.trace import (
     trace_set_thread_info,
 )
 from sglang.srt.runtime_context import (
+    get_device,
     get_disagg,
     get_exec,
     get_mm,
+    get_model,
     get_parallel,
+    get_serving,
     publish,
 )
 from sglang.srt.server_args import (
@@ -315,7 +318,7 @@ class MMEncoder:
         logger.info(f"init MMEncoder {rank}/{server_args.tp_size}")
         self.server_args = server_args
         configure_media_url_security(
-            server_args.allowed_media_domains,
+            get_mm().allowed_media_domains,
             server_args.media_url_max_file_size_mb,
         )
         self.rank = rank
@@ -329,7 +332,7 @@ class MMEncoder:
             server_args,
         )
         self.load_config = LoadConfig(
-            load_format=server_args.load_format,
+            load_format=get_model().load_format,
             download_dir=server_args.download_dir,
             model_loader_extra_config=server_args.model_loader_extra_config,
             remote_instance_weight_loader_seed_instance_ip=server_args.remote_instance_weight_loader_seed_instance_ip,
@@ -340,7 +343,7 @@ class MMEncoder:
             self.model_config.hf_config, "model_type", "unknown"
         ).lower()
 
-        self.device = server_args.device
+        self.device = get_device().device
         self.gpu_id = server_args.base_gpu_id + rank if gpu_id is None else gpu_id
 
         self.device_config = DeviceConfig(
@@ -354,7 +357,7 @@ class MMEncoder:
             use_image_processor_gpu
             and resolve_image_processor_backend(server_args) != "pil"
         )
-        self._build_vision_config(server_args.mm_process_config)
+        self._build_vision_config(get_mm().mm_process_config)
         self.model_audio_sr = self._resolve_audio_sr()
         logger.info(f"Resolved model audio sample rate: {self.model_audio_sr} Hz")
 
@@ -368,7 +371,7 @@ class MMEncoder:
         initialize_model_parallel(tensor_model_parallel_size=server_args.tp_size)
         initialize_dp_attention(server_args, self.model_config)
 
-        self.model = get_model(
+        self.model = load_model(
             model_config=self.model_config,
             load_config=self.load_config,
             device_config=self.device_config,
@@ -628,7 +631,7 @@ class MMEncoder:
         )
         try:
             self.image_processor = AutoImageProcessor.from_pretrained(
-                server_args.tokenizer_path or server_args.model_path,
+                get_serving().tokenizer_path or get_model().model_path,
                 trust_remote_code=server_args.trust_remote_code,
                 revision=server_args.revision,
                 **image_processor_kwargs,
@@ -639,7 +642,7 @@ class MMEncoder:
 
         try:
             self.video_processor = AutoVideoProcessor.from_pretrained(
-                server_args.tokenizer_path or server_args.model_path,
+                get_serving().tokenizer_path or get_model().model_path,
                 trust_remote_code=server_args.trust_remote_code,
                 revision=server_args.revision,
             )
@@ -650,7 +653,7 @@ class MMEncoder:
         try:
             # Note: AutoProcessor is used for audio processor
             _audio_proc = AutoProcessor.from_pretrained(
-                server_args.tokenizer_path or server_args.model_path,
+                get_serving().tokenizer_path or get_model().model_path,
                 trust_remote_code=server_args.trust_remote_code,
                 revision=server_args.revision,
             )
@@ -2100,7 +2103,7 @@ class MMEncoder:
 
         _zmq_xfer_start = time.perf_counter()
         if (
-            self.server_args.encoder_transfer_backend == "zmq_to_scheduler"
+            get_disagg().encoder_transfer_backend == "zmq_to_scheduler"
             and url is not None
         ):
             lock = self.scheduler_send_locks.get(endpoint)
@@ -2146,7 +2149,7 @@ class MMEncoder:
             if encoder_metrics_collector is not None:
                 encoder_metrics_collector.observe_transfer(
                     time.perf_counter() - _zmq_xfer_start,
-                    backend=self.server_args.encoder_transfer_backend,
+                    backend=get_disagg().encoder_transfer_backend,
                 )
             return
 
@@ -3007,7 +3010,7 @@ async def _push_embedding_to_prefill(enc: MMEncoder, request: dict) -> None:
     # No-op for mooncake (its /send is separate). embedding_port=None is
     # rejected upfront, so ports is always a concrete list here.
     req_id = request["req_id"]
-    backend = enc.server_args.encoder_transfer_backend
+    backend = get_disagg().encoder_transfer_backend
 
     if backend == "zmq_to_tokenizer":
         await enc.send(
@@ -3050,7 +3053,7 @@ async def _dp_worker_encode_and_send(
     modality = Modality.from_str(request["modality"])
     time_stats.modality = modality.name.lower()
     time_stats.set_metrics_collector(encoder_metrics_collector)
-    backend = enc.server_args.encoder_transfer_backend
+    backend = get_disagg().encoder_transfer_backend
 
     # URL state lives in main process module globals; workers don't see it.
     if backend == "zmq_to_scheduler" and request.get("embedding_port") is None:
@@ -3669,7 +3672,7 @@ async def run_dp_worker(
     if server_args.enable_metrics:
         set_prometheus_multiproc_dir()
         labels = {
-            "model_name": server_args.served_model_name,
+            "model_name": get_serving().served_model_name,
             "dp_rank": str(dp_rank),
         }
         if server_args.extra_metric_labels:
@@ -3967,7 +3970,7 @@ def launch_server(server_args: ServerArgs):
     if server_args.enable_metrics:
         set_prometheus_multiproc_dir()
         labels = {
-            "model_name": server_args.served_model_name,
+            "model_name": get_serving().served_model_name,
             "dp_rank": "0",
         }
         if server_args.extra_metric_labels:
@@ -4083,7 +4086,7 @@ def _launch_server_dp(server_args: ServerArgs):
             proc.start()
         worker_processes.append(proc)
 
-    labels = {"model_name": server_args.served_model_name}
+    labels = {"model_name": get_serving().served_model_name}
     if server_args.extra_metric_labels:
         labels.update(server_args.extra_metric_labels)
     dp_dispatcher = DPDispatcher(
@@ -4188,7 +4191,7 @@ async def handle_encode_request(request: dict):
         # when multiple decoder TP ranks POST /encode
         # with the same req_id, only the first triggers the VIT forward;
         # subsequent callers wait and return the same metadata.
-        if encoder.server_args.encoder_transfer_backend == "mooncake":
+        if get_disagg().encoder_transfer_backend == "mooncake":
             async with encoder._inflight_encode_lock:
                 if req_id in encoder._inflight_encode_events:
                     event = encoder._inflight_encode_events[req_id]
@@ -4274,7 +4277,7 @@ async def handle_encode_request(request: dict):
             time_stats.set_mm_encode_end_time()
 
         if error_msg:
-            if encoder.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+            if get_disagg().encoder_transfer_backend == "zmq_to_scheduler":
                 if request["embedding_port"] is None:
                     start_background_send(req_id)
                 else:
@@ -4285,7 +4288,7 @@ async def handle_encode_request(request: dict):
                             embedding_port=port,
                         )
             # Signal waiters on failure for mooncake
-            if encoder.server_args.encoder_transfer_backend == "mooncake":
+            if get_disagg().encoder_transfer_backend == "mooncake":
                 encoder._inflight_encode_meta.pop(req_id, None)
                 evt = encoder._inflight_encode_events.pop(req_id, None)
                 if evt:
@@ -4299,7 +4302,7 @@ async def handle_encode_request(request: dict):
                 status_code=error_code,
                 content={"status": "error", "message": error_msg, "req_id": req_id},
             )
-        if encoder.server_args.encoder_transfer_backend == "mooncake":
+        if get_disagg().encoder_transfer_backend == "mooncake":
             # Store metadata for duplicate callers and signal them
             encoder._inflight_encode_meta[req_id] = (
                 nbytes,
@@ -4323,7 +4326,7 @@ async def handle_encode_request(request: dict):
                     modality=modality_str, status="success"
                 )
             return ORJSONResponse(content=request)
-        elif encoder.server_args.encoder_transfer_backend == "zmq_to_scheduler":
+        elif get_disagg().encoder_transfer_backend == "zmq_to_scheduler":
             logger.info(f"{request['embedding_port'] = }")
             if request["embedding_port"] is None:
                 await encoder.send_with_url(
@@ -4347,7 +4350,7 @@ async def handle_encode_request(request: dict):
                     modality=modality_str, status="success"
                 )
             return ORJSONResponse(content=None)
-        elif encoder.server_args.encoder_transfer_backend == "zmq_to_tokenizer":
+        elif get_disagg().encoder_transfer_backend == "zmq_to_tokenizer":
             await encoder.send(
                 req_id=request["req_id"],
                 prefill_host=request["prefill_host"],
@@ -4369,7 +4372,7 @@ async def handle_encode_request(request: dict):
         logger.error(f"Unexpected error in encoder logic for {req_id}: {error_msg}")
         rid_to_err_msg[req_id] = error_msg
         # Ensure inflight waiters are unblocked on unexpected errors
-        if encoder.server_args.encoder_transfer_backend == "mooncake":
+        if get_disagg().encoder_transfer_backend == "mooncake":
             encoder._inflight_encode_meta.pop(req_id, None)
             evt = encoder._inflight_encode_events.pop(req_id, None)
             if evt:

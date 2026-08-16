@@ -222,9 +222,13 @@ class TestMediaIdentity(unittest.TestCase):
             disable_fast_image_processor=False,
             mm_process_config={"image": {"max_pixels": 1024}},
         )
-        base = build_processor_fingerprint(Processor("gpu"), config, args)
+        base = build_processor_fingerprint(
+            Processor("gpu"), config, args, mm_process_config=args.mm_process_config
+        )
 
-        changed_backend = build_processor_fingerprint(Processor("cpu"), config, args)
+        changed_backend = build_processor_fingerprint(
+            Processor("cpu"), config, args, mm_process_config=args.mm_process_config
+        )
         changed_args = ServerArgs(
             model_path="dummy",
             revision="model-revision",
@@ -232,7 +236,10 @@ class TestMediaIdentity(unittest.TestCase):
             mm_process_config={"image": {"max_pixels": 2048}},
         )
         changed_config = build_processor_fingerprint(
-            Processor("gpu"), config, changed_args
+            Processor("gpu"),
+            config,
+            changed_args,
+            mm_process_config=changed_args.mm_process_config,
         )
         self.assertNotEqual(base, changed_backend)
         self.assertNotEqual(base, changed_config)
