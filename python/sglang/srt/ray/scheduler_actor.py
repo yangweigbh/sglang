@@ -75,6 +75,10 @@ class SchedulerActor:
             actual_gpu_id = gpu_id
             logger.info(f"[TP{tp_rank}] Using passed gpu_id: {gpu_id}")
 
+        # Publish before configuring the process: this actor reads config
+        # namespaces from there on, and no run_scheduler_process ran for it.
+        publish(server_args, role="scheduler")
+
         # Configure worker (logging, process title, etc.)
         dp_rank = configure_scheduler_process(
             server_args,
@@ -98,10 +102,6 @@ class SchedulerActor:
                 logger.info(
                     f"[TP{tp_rank}] Bound to NUMA node {numa_node} for GPU {actual_gpu_id}"
                 )
-
-        # This actor constructs Scheduler directly (no run_scheduler_process),
-        # which reads the config namespaces before the model worker's publish.
-        publish(server_args, role="scheduler")
 
         # Create scheduler (loads model into GPU, initializes NCCL)
         self.scheduler = Scheduler(

@@ -1155,6 +1155,7 @@ ROLE_NAMESPACE_SETS: dict[str, frozenset[str] | None] = {
     # a wrong set fails a request rather than a test.
     "tokenizer": None,
     # Deployment shapes not exercised locally; audit before restricting.
+    "detokenizer": None,
     "encoder": None,
     "expert_backup": None,
     "weight_cache_daemon": None,
